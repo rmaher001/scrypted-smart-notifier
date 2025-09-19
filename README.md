@@ -19,12 +19,15 @@ The Smart Notifier system eliminates duplicate notifications by tracking persons
 
 ## Current Status (2025-09-19)
 
-⚠️ **PROJECT BLOCKED** - Python plugin deployment issues
+✅ **WORKING** - Both plugins operational with ReID pipeline functional
 
 - ✅ **smart-notifier**: Working - captures detections and calls ReID service
-- ❌ **reid-service**: **Crashes Scrypted server during deployment**
-- 🔧 **Issue**: Plugin stability problems (both large 7.8MB and lightweight 27KB versions)
-- 📋 **Next**: Resolve Python plugin deployment issues or consider alternative ReID implementation
+- ✅ **reid-service**: Working - ONNX model download and processing functional
+- ✅ **Pipeline**: TypeScript → Python RPC communication verified
+- ✅ **Model**: OSNet AIN ONNX (8.3MB) downloading on first use from GitHub releases
+- ⚠️ **Startup**: Python service takes significant time to initialize (model download + dependencies)
+- 🔧 **Dependencies**: All Python packages (numpy, onnxruntime, opencv, Pillow) installing correctly
+- 📋 **Next**: Implement actual ReID embedding comparison logic
 
 ## Components
 
@@ -57,6 +60,24 @@ The Smart Notifier system eliminates duplicate notifications by tracking persons
 
 ## Known Issues
 
-- Python plugin causes Scrypted server crashes
-- Large ONNX model (8.3MB) deployment problems
-- Plugin loading failures with "Error: close"
+- **Slow startup**: Python service takes significant time to initialize (first-time model download + dependency installation)
+- **Server restart required**: After Python dependency changes, Scrypted server must be restarted
+- **Model download delay**: 8.3MB ONNX model download on first use can take time depending on connection
+
+## Debugging
+
+Both plugins now include timing logs to help debug startup and performance issues:
+
+**Smart Notifier logs:**
+```
+Smart Notifier: Calling ReID service for [CameraName] with N person(s)
+Smart Notifier: ReID service response received in XXXms
+```
+
+**ReID Service logs:**
+```
+🚀 ReID service initializing...
+⏱️  Model download took X.Xs
+⏱️  ONNX session creation took X.Xs
+✅ ReID service fully initialized in X.Xs - ready for processing!
+```

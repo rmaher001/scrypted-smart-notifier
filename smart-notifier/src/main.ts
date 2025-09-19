@@ -71,6 +71,8 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> {
                             hasPersons: true  // Always true since we filtered
                         };
 
+                        console.log(`Smart Notifier: Calling ReID service for ${this.name} with ${personDetections.length} person(s)`);
+                        const startTime = Date.now();
 
                         const result = await reid.convert(
                             JSON.stringify(data),
@@ -78,11 +80,14 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> {
                             'application/reid'
                         );
 
+                        const duration = Date.now() - startTime;
+                        console.log(`Smart Notifier: ReID service response received in ${duration}ms`);
+
                         const parsed = JSON.parse(result);
 
                         // TODO: Process ReID result and decide on notification
                     } catch (e) {
-                        console.error('Failed to call ReID service:', e);
+                        console.error('Smart Notifier: Failed to call ReID service:', e);
                     }
                 });
             }
