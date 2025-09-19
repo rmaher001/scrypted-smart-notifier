@@ -1,0 +1,27 @@
+node_modules/
+dist/
+out/
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.vscode/
+.idea/
+
+# Plugin specific
+smart-notifier/node_modules/
+smart-notifier/dist/
+smart-notifier/out/
+smart-notifier/*.log
+
+reid-service/node_modules/
+reid-service/dist/
+reid-service/out/
+reid-service/*.log
+reid-service/src/__pycache__/
+
+# Large model files (download at runtime)
+*.onnx
+models/
