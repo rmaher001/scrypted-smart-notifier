@@ -1,6 +1,6 @@
 {
   "name": "@scrypted/smart-notifier",
-  "version": "0.1.5",
+  "version": "0.1.8",
   "description": "Smart Notifier - Cross-camera person deduplication",
   "scripts": {
     "scrypted-setup-project": "scrypted-setup-project",

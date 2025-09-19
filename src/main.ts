@@ -33,14 +33,24 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> {
                         return;
                     }
 
-                    const personDetections = detected.detections.filter(d =>
-                        d.className === 'person' || d.className === 'face'
-                    );
+                    // Filter for person and face detections
+                    const personDetections = detected.detections.filter(d => d.className === 'person');
+                    const faceDetections = detected.detections.filter(d => d.className === 'face');
 
-                    // Skip if no person/face detections
+                    // Skip if no person detections (we focus on person bodies for ReID)
                     if (personDetections.length === 0) {
                         return;
                     }
+
+                    // Attach face labels to person detections when available
+                    personDetections.forEach(person => {
+                        // Find a face detection that might belong to this person
+                        // (In practice, there's often one face per person detection)
+                        const face = faceDetections.find(f => f.label);
+                        if (face) {
+                            (person as any).faceLabel = face.label;
+                        }
+                    });
 
                     // Get ReID service again in case it changed
                     const reid = systemManager.getDeviceByName<BufferConverter>('ReID Service');
@@ -51,6 +61,26 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> {
 
                     // Call ReID service using BufferConverter interface
                     try {
+                        // Get detection snapshot using getRecordingStreamThumbnail
+                        let imageBase64: string | null = null;
+                        try {
+                            const snapshot = await this.mixinDevice.getRecordingStreamThumbnail(detected.timestamp);
+                            if (snapshot) {
+                                console.log(`Smart Notifier: Retrieved snapshot for ${this.name}`);
+                                // Convert MediaObject to buffer then to base64
+                                const imageBuffer = await sdk.mediaManager.convertMediaObjectToBuffer(snapshot, 'image/jpeg');
+                                imageBase64 = imageBuffer.toString('base64');
+                                console.log(`Smart Notifier: Converted snapshot to base64 (${imageBuffer.length} bytes)`);
+                            }
+                        } catch (e) {
+                            console.log(`Smart Notifier: Failed to get snapshot for ${this.name}:`, e);
+                        }
+
+                        if (!imageBase64) {
+                            console.log(`Smart Notifier: No image available for ${this.name}, skipping ReID`);
+                            return;
+                        }
+
                         // Extract relevant detection data (person/face only)
                         const data = {
                             timestamp: detected.timestamp,
@@ -65,8 +95,11 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> {
                                 score: d.score,
                                 boundingBox: d.boundingBox,
                                 id: d.id,  // Tracking ID if available
-                                zones: d.zones
+                                zones: d.zones,
+                                faceLabel: (d as any).faceLabel || undefined  // Face label if available
                             })),
+                            // Send base64 encoded image for ReID processing
+                            imageBase64: imageBase64,
                             // Metadata
                             detectionCount: personDetections.length,
                             hasPersons: true  // Always true since we filtered
