@@ -1,11 +1,12 @@
 # Smart Notifier Architecture
 
 ## Current Status (2025-09-19)
-**Status**: ⚠️ **BLOCKED** - Python plugin deployment issues
+**Status**: ✅ **WORKING** - End-to-end ReID system operational
 - ✅ Smart-notifier (TypeScript) working - successfully captures detections and calls ReID service
-- ❌ ReID-service (Python) - **crashes Scrypted server when deployed**
-- 🔧 Issue: Large ONNX model (8.3MB) in plugin bundle causes crashes, lightweight plugin still failing
-- 📋 Next: Resolve Python plugin stability issues or consider alternative ReID implementation
+- ✅ ReID-service (Python) - **deployed and processing person detections successfully**
+- ✅ Cross-camera person matching with 0.7 similarity threshold working
+- ✅ Person tracking with 90-second cache and proper stats reporting
+- 📋 Next: Complete Smart Notifier frontend implementation for ReID result processing
 
 ## Overview
 The Smart Notifier system provides **cross-camera person deduplication** using ReID (Person Re-Identification) technology. It tracks persons across multiple cameras within a 60-second window and only sends notifications for new/unique persons, eliminating duplicate notifications.

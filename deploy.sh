@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Smart Notifier Plugin - Remote Debug Deployment Script
-# Default server: 192.168.86.74
+# Default server: 192.168.86.98
 
-DEFAULT_IP="192.168.86.74"
+DEFAULT_IP="192.168.86.98"
 SERVER_IP="${1:-$DEFAULT_IP}"
 
 echo "🚀 Deploying Smart Notifier Plugin to Scrypted Server"
