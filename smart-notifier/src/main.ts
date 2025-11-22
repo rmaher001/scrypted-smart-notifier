@@ -1,4 +1,4 @@
-import sdk, { MixinProvider, ScryptedDeviceBase, MixinDeviceBase, ScryptedDeviceType, ScryptedInterface, BufferConverter, ObjectDetector, Settings, Notifier, MediaObject, NotifierOptions } from '@scrypted/sdk';
+import sdk, { MixinProvider, ScryptedDeviceBase, MixinDeviceBase, ScryptedDeviceType, ScryptedInterface, BufferConverter, ObjectDetector, ObjectDetectionTypes, Settings, Notifier, MediaObject, NotifierOptions } from '@scrypted/sdk';
 
 
 const { systemManager } = sdk;
@@ -38,7 +38,7 @@ function resizeJpegNearest(input: Buffer, targetWidth: number, quality = 60): Bu
     return Buffer.from(data);
 }
 
-class ListenerMixin extends MixinDeviceBase<ObjectDetector> {
+class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDetector {
     listener: any;
     checkInterval: NodeJS.Timeout;
     cooldowns: Map<string, { timestamp: number, label: string | null }> = new Map();
@@ -379,6 +379,14 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> {
         } catch (e) {
             console.error('Smart Notifier: Failed to send notification:', e);
         }
+    }
+
+    async getDetectionInput(detectionId?: string): Promise<any> {
+        return this.mixinDevice.getDetectionInput(detectionId);
+    }
+
+    async getObjectTypes(): Promise<ObjectDetectionTypes> {
+        return this.mixinDevice.getObjectTypes();
     }
 
     release() {
