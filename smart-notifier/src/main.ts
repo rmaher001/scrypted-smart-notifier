@@ -314,9 +314,6 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
                                     // Start buffer
                                     console.log(`[${timestamp()}] Smart Notifier: Buffering notification for ${personId} (waiting 3s for identification)...`);
 
-                                    // Set placeholder immediately to block parallel requests
-                                    this.pendingNotifications.set(personId, { timer: null as any, image: jpegBuffer });
-
                                     const timer = setTimeout(() => {
                                         // Check cooldown AGAIN before sending, in case an upgrade happened while waiting
                                         const freshLastSeen = this.cooldowns.get(personId);
@@ -334,7 +331,7 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
                                         this.sendNotification(personId, 'Person', jpegBuffer, true);
                                     }, 3000);
 
-                                    // Update with real timer
+                                    // Set entry immediately to block parallel requests
                                     this.pendingNotifications.set(personId, { timer, image: jpegBuffer });
                                 }
                             } finally {
