@@ -41,7 +41,6 @@ function resizeJpegNearest(input: Buffer, targetWidth: number, quality = 60): Bu
 class ListenerMixin extends MixinDeviceBase<ObjectDetector> {
     listener: any;
     checkInterval: NodeJS.Timeout;
-    mixinDevice: any;
     cooldowns: Map<string, { timestamp: number, label: string | null }> = new Map();
     detectionLastProcessed: Map<string, number> = new Map();
     pendingNotifications: Map<string, { timer: NodeJS.Timeout, image: Buffer }> = new Map();
@@ -50,7 +49,6 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> {
 
     constructor(options: any) {
         super(options);
-        this.mixinDevice = options.mixinDevice;
 
         // Set up listener for object detection events
         if (!this.listener) {
@@ -82,7 +80,7 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> {
                 }
             }, 60000);
 
-            this.listener = options.mixinDevice.listen(ScryptedInterface.ObjectDetector, async (source: any, details: any, detected: any) => {
+            this.listener = systemManager.listenDevice(this.id, ScryptedInterface.ObjectDetector, async (source: any, details: any, detected: any) => {
                 // CRITICAL: Only process events with valid detection IDs (not motion-only events)
                 if (!detected.detectionId) {
                     return;
@@ -399,12 +397,16 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> {
 }
 
 class SmartNotifierListener extends ScryptedDeviceBase implements MixinProvider {
+    constructor(nativeId?: string) {
+        super(nativeId);
+    }
+
     async canMixin(type: ScryptedDeviceType, interfaces: string[]): Promise<string[]> {
         // Only mixin on cameras with ObjectDetector
         if (type === ScryptedDeviceType.Camera && interfaces.includes(ScryptedInterface.ObjectDetector)) {
-            return []; // Don't provide any interfaces, just listen to events
+            return [ScryptedInterface.ObjectDetector];
         }
-        return undefined as any;
+        return null;
     }
 
     async getMixin(mixinDevice: any, mixinDeviceInterfaces: ScryptedInterface[], mixinDeviceState: any) {
@@ -421,4 +423,4 @@ class SmartNotifierListener extends ScryptedDeviceBase implements MixinProvider 
     }
 }
 
-export default new SmartNotifierListener();
+export default SmartNotifierListener;

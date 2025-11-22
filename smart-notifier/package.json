@@ -1,10 +1,10 @@
 {
   "name": "@scrypted/smart-notifier",
-  "version": "0.1.1",
+  "version": "0.1.11",
   "description": "Smart Notifier - Cross-camera person deduplication",
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && scrypted-webpack",
     "deploy": "npx scrypted-deploy-debug 192.168.86.74"
   },
   "scrypted": {
@@ -14,7 +14,11 @@
       "MixinProvider"
     ]
   },
+  "dependencies": {
+    "jpeg-js": "^0.4.4"
+  },
   "devDependencies": {
+    "@scrypted/common": "^1.0.2",
     "@scrypted/sdk": "^0.3.0",
     "@types/node": "^20.0.0",
     "typescript": "^5.2.2"
