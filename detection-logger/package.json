@@ -1,0 +1,30 @@
+{
+  "name": "@scrypted/detection-logger",
+  "version": "1.0.0",
+  "description": "Simple plugin that logs camera detection events to console",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "rimraf dist && tsc && scrypted-webpack",
+    "deploy": "scrypted-deploy 192.168.86.74"
+  },
+  "keywords": [
+    "scrypted",
+    "plugin",
+    "detection",
+    "logger"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@scrypted/sdk": "latest",
+    "rimraf": "^3.0.2",
+    "typescript": "^4.9.5"
+  },
+  "scrypted": {
+    "name": "Detection Logger",
+    "type": "API",
+    "interfaces": [
+      "MixinProvider"
+    ]
+  }
+}
