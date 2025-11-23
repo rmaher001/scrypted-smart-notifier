@@ -38,22 +38,207 @@ function resizeJpegNearest(input: Buffer, targetWidth: number, quality = 60): Bu
     return Buffer.from(data);
 }
 
+// GLOBAL state shared across all camera instances
+const globalCooldowns: Map<string, { timestamp: number, label: string | null }> = new Map();
+const globalPendingNotifications: Map<string, { timer: NodeJS.Timeout, image: Buffer }> = new Map();
+const globalProcessing: Set<string> = new Set();
+
+// FACE-BASED cooldown (trumps personId) - keyed by face label (e.g., "Richard")
+const globalFaceCooldowns: Map<string, number> = new Map();
+
+// STATS tracking
+interface Stats {
+    // Detection counts
+    personDetections: number;
+    faceDetections: number;
+    detectionsWithNames: number;
+
+    // Notification counts
+    genericNotificationsSent: number;
+    namedNotificationsSent: number;
+    upgradeNotificationsSent: number;
+
+    // Suppression counts
+    suppressedByPersonIdCooldown: number;
+    suppressedByFaceCooldown: number;
+    suppressedByPendingBuffer: number;
+    suppressedByProcessingLock: number;
+
+    // Cooldown miss tracking (notifications that slipped through)
+    notificationsSentDespiteRecentPersonId: number;
+    notificationsSentDespiteRecentFace: number;
+
+    // ReID tracking
+    uniquePersonIds: Set<string>;
+    uniqueFaceLabels: Set<string>;
+    genericPersonCount: number;
+    reidServiceCalls: number;
+    reidServiceTotalTime: number;
+    reidServiceFailures: number;
+
+    // Period tracking
+    periodStart: number;
+}
+
+let globalStats: Stats = {
+    personDetections: 0,
+    faceDetections: 0,
+    detectionsWithNames: 0,
+    genericNotificationsSent: 0,
+    namedNotificationsSent: 0,
+    upgradeNotificationsSent: 0,
+    suppressedByPersonIdCooldown: 0,
+    suppressedByFaceCooldown: 0,
+    suppressedByPendingBuffer: 0,
+    suppressedByProcessingLock: 0,
+    notificationsSentDespiteRecentPersonId: 0,
+    notificationsSentDespiteRecentFace: 0,
+    uniquePersonIds: new Set(),
+    uniqueFaceLabels: new Set(),
+    genericPersonCount: 0,
+    reidServiceCalls: 0,
+    reidServiceTotalTime: 0,
+    reidServiceFailures: 0,
+    periodStart: Date.now()
+};
+
+let statsInterval: NodeJS.Timeout | null = null;
+
+function resetStats() {
+    globalStats = {
+        personDetections: 0,
+        faceDetections: 0,
+        detectionsWithNames: 0,
+        genericNotificationsSent: 0,
+        namedNotificationsSent: 0,
+        upgradeNotificationsSent: 0,
+        suppressedByPersonIdCooldown: 0,
+        suppressedByFaceCooldown: 0,
+        suppressedByPendingBuffer: 0,
+        suppressedByProcessingLock: 0,
+        notificationsSentDespiteRecentPersonId: 0,
+        notificationsSentDespiteRecentFace: 0,
+        uniquePersonIds: new Set(),
+        uniqueFaceLabels: new Set(),
+        genericPersonCount: 0,
+        reidServiceCalls: 0,
+        reidServiceTotalTime: 0,
+        reidServiceFailures: 0,
+        periodStart: Date.now()
+    };
+}
+
+function logStats() {
+    const duration = (Date.now() - globalStats.periodStart) / 1000 / 60; // minutes
+    const totalDetections = globalStats.personDetections;
+    const totalNotifications = globalStats.genericNotificationsSent + globalStats.namedNotificationsSent + globalStats.upgradeNotificationsSent;
+    const totalSuppressions = globalStats.suppressedByPersonIdCooldown + globalStats.suppressedByFaceCooldown +
+                              globalStats.suppressedByPendingBuffer + globalStats.suppressedByProcessingLock;
+    const suppressionRate = totalDetections > 0 ? ((totalSuppressions / totalDetections) * 100).toFixed(1) : '0.0';
+    const faceRecognitionRate = totalDetections > 0 ? ((globalStats.detectionsWithNames / totalDetections) * 100).toFixed(1) : '0.0';
+    const avgReidTime = globalStats.reidServiceCalls > 0 ? Math.round(globalStats.reidServiceTotalTime / globalStats.reidServiceCalls) : 0;
+
+    const uniquePersonIdCount = globalStats.uniquePersonIds.size;
+    const uniqueFaceLabelCount = globalStats.uniqueFaceLabels.size;
+    const actualPeopleCount = uniqueFaceLabelCount + globalStats.genericPersonCount;
+    const reidFragmentation = actualPeopleCount > 0 ? (uniquePersonIdCount / actualPeopleCount).toFixed(2) : '0.00';
+
+    console.log(`\n\n${'#'.repeat(70)}`);
+    console.log(`${'#'.repeat(70)}`);
+    console.log(`###${' '.repeat(64)}###`);
+    console.log(`###   SMART NOTIFIER STATS (${duration.toFixed(1)} min)${' '.repeat(Math.max(0, 39 - duration.toFixed(1).length))}###`);
+    console.log(`###${' '.repeat(64)}###`);
+    console.log(`${'#'.repeat(70)}`);
+    console.log(`${'#'.repeat(70)}`);
+    console.log(`\nDetections: ${globalStats.personDetections} person, ${globalStats.faceDetections} face (${faceRecognitionRate}% with names)`);
+    console.log(`Notifications: ${totalNotifications} sent (${globalStats.namedNotificationsSent} named, ${globalStats.genericNotificationsSent} generic, ${globalStats.upgradeNotificationsSent} upgrades)`);
+    console.log(`Suppressions: ${totalSuppressions} (${suppressionRate}% rate)`);
+    console.log(`  - ${globalStats.suppressedByPersonIdCooldown} by personId cooldown`);
+    console.log(`  - ${globalStats.suppressedByFaceCooldown} by face cooldown`);
+    console.log(`  - ${globalStats.suppressedByPendingBuffer} by buffer check`);
+    console.log(`  - ${globalStats.suppressedByProcessingLock} by processing lock`);
+
+    // Calculate ReID effectiveness
+    const totalCooldownSuppressions = globalStats.suppressedByPersonIdCooldown + globalStats.suppressedByFaceCooldown;
+    const reidEffectiveness = totalCooldownSuppressions > 0
+        ? ((globalStats.suppressedByPersonIdCooldown / totalCooldownSuppressions) * 100).toFixed(1)
+        : '0.0';
+
+    console.log(`\nReID Effectiveness:`);
+    console.log(`  - ${reidEffectiveness}% (${globalStats.suppressedByPersonIdCooldown} caught by personId, ${globalStats.suppressedByFaceCooldown} required face cooldown)`);
+
+    console.log(`\nCooldown Misses (potential duplicates sent):`);
+    console.log(`  - ${globalStats.notificationsSentDespiteRecentPersonId} sent despite recent personId`);
+    console.log(`  - ${globalStats.notificationsSentDespiteRecentFace} sent despite recent face`);
+
+    console.log(`\nReID Accuracy:`);
+    console.log(`  - Unique personIds: ${uniquePersonIdCount}`);
+    console.log(`  - Unique faces: ${uniqueFaceLabelCount}${uniqueFaceLabelCount > 0 ? ' (' + Array.from(globalStats.uniqueFaceLabels).join(', ') + ')' : ''}`);
+    console.log(`  - Generic persons: ${globalStats.genericPersonCount}`);
+    console.log(`  - ReID fragmentation: ${uniquePersonIdCount} personIds for ${actualPeopleCount} actual people (${reidFragmentation}x)`);
+    console.log(`\nReID Service: ${globalStats.reidServiceCalls} calls, avg ${avgReidTime}ms, ${globalStats.reidServiceFailures} failures`);
+    console.log(`\n${'#'.repeat(70)}`);
+    console.log(`${'#'.repeat(70)}\n\n`);
+
+    resetStats();
+}
+
+// Global cleanup interval (runs once for all instances)
+let globalCleanupInterval: NodeJS.Timeout | null = null;
+let instanceCount = 0;
+
 class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDetector {
     listener: any;
-    checkInterval: NodeJS.Timeout;
-    cooldowns: Map<string, { timestamp: number, label: string | null }> = new Map();
     detectionLastProcessed: Map<string, number> = new Map();
-    pendingNotifications: Map<string, { timer: NodeJS.Timeout, image: Buffer }> = new Map();
-    processing: Set<string> = new Set();
 
 
     constructor(options: any) {
         super(options);
 
+        // Increment instance counter
+        instanceCount++;
+
+        // Set up stats logging interval (only once) - every 5 minutes
+        if (!statsInterval) {
+            statsInterval = setInterval(() => {
+                logStats();
+            }, 5 * 60 * 1000);
+        }
+
+        // Set up global cleanup interval (only once)
+        if (!globalCleanupInterval) {
+            globalCleanupInterval = setInterval(() => {
+                const now = Date.now();
+
+                // Cleanup cooldowns (1 hour - plenty of time since cooldown is 5 mins)
+                for (const [id, data] of globalCooldowns) {
+                    if (now - data.timestamp > 3600000) {
+                        globalCooldowns.delete(id);
+                    }
+                }
+
+                // Cleanup face cooldowns (1 hour)
+                for (const [name, timestamp] of globalFaceCooldowns) {
+                    if (now - timestamp > 3600000) {
+                        globalFaceCooldowns.delete(name);
+                    }
+                }
+
+                // Safety cleanup for pending notifications
+                for (const [id, data] of globalPendingNotifications) {
+                    if (globalPendingNotifications.size > 100) {
+                        console.warn('Smart Notifier: Pending notifications map too large, clearing.');
+                        clearTimeout(data.timer);
+                        globalPendingNotifications.delete(id);
+                    }
+                }
+            }, 60000);
+        }
+
         // Set up listener for object detection events
         if (!this.listener) {
-            // Clean up old detection timestamps and cooldowns every minute
-            this.checkInterval = setInterval(() => {
+            // Clean up old detection timestamps every minute (per-instance)
+            const checkInterval = setInterval(() => {
                 const now = Date.now();
 
                 // Cleanup detection throttling (1 minute)
@@ -62,23 +247,10 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
                         this.detectionLastProcessed.delete(id);
                     }
                 }
-
-                // Cleanup cooldowns (1 hour - plenty of time since cooldown is 5 mins)
-                for (const [id, data] of this.cooldowns) {
-                    if (now - data.timestamp > 3600000) {
-                        this.cooldowns.delete(id);
-                    }
-                }
-
-                // Safety cleanup for pending notifications
-                for (const [id, data] of this.pendingNotifications) {
-                    if (this.pendingNotifications.size > 100) {
-                        console.warn('Smart Notifier: Pending notifications map too large, clearing.');
-                        clearTimeout(data.timer);
-                        this.pendingNotifications.delete(id);
-                    }
-                }
             }, 60000);
+
+            // Store the interval reference for cleanup
+            (this as any).localCleanupInterval = checkInterval;
 
             this.listener = systemManager.listenDevice(this.id, ScryptedInterface.ObjectDetector, async (source: any, details: any, detected: any) => {
                 // CRITICAL: Only process events with valid detection IDs (not motion-only events)
@@ -99,14 +271,28 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
                     return;
                 }
 
+                // Filter for person/face detections with proper score thresholds
+                const PERSON_THRESHOLD = 0.8;
+                const FACE_THRESHOLD = 0.7;
+
                 const personDetections = detected.detections.filter(d =>
-                    d.className === 'person' || d.className === 'face'
+                    (d.className === 'person' && d.score >= PERSON_THRESHOLD) ||
+                    (d.className === 'face' && d.score >= FACE_THRESHOLD)
                 );
 
                 if (personDetections.length > 0) {
                     console.log(`[${timestamp()}] Smart Notifier: Raw detections for ${this.name}:`,
                         personDetections.map(d => `${d.className} (${d.score.toFixed(2)}) [${d.boundingBox.map(n => Math.round(n)).join(',')}]`).join('; ')
                     );
+
+                    // Count person vs face detections
+                    for (const det of personDetections) {
+                        if (det.className === 'person') {
+                            globalStats.personDetections++;
+                        } else if (det.className === 'face') {
+                            globalStats.faceDetections++;
+                        }
+                    }
                 }
 
                 // Skip if no person/face detections
@@ -212,6 +398,8 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
                     // Call standalone ReID HTTP service
                     const reidServiceUrl = process.env.REID_SERVICE_URL || 'http://192.168.86.84:8765/process';
 
+                    globalStats.reidServiceCalls++;
+
                     const response = await fetch(reidServiceUrl, {
                         method: 'POST',
                         headers: {
@@ -227,6 +415,7 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
                     const parsed = await response.json();
 
                     const duration = Date.now() - startTime;
+                    globalStats.reidServiceTotalTime += duration;
                     console.log(`[${timestamp()}] Smart Notifier: ReID service response received in ${duration}ms`);
 
                     // Process ReID results
@@ -238,108 +427,164 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
                             const personId = det.personId;
                             if (!personId) continue;
 
+                            // Track unique personIds
+                            globalStats.uniquePersonIds.add(personId);
+
                             // GLOBAL LOCK: Check if we are already processing this person
-                            if (this.processing.has(personId)) {
+                            if (globalProcessing.has(personId)) {
+                                globalStats.suppressedByProcessingLock++;
                                 // console.log(`[${timestamp()}] Smart Notifier: Skipping ${personId} - already processing`);
                                 continue;
                             }
-                            this.processing.add(personId);
+                            globalProcessing.add(personId);
 
                             try {
                                 // Determine name for current detection
                                 const currentLabel = (det.label && det.label !== 'person' && det.label !== 'face') ? det.label : null;
 
-                                // Check per-person cooldown
+                                // Track detections with names and unique face labels
+                                if (currentLabel) {
+                                    globalStats.detectionsWithNames++;
+                                    globalStats.uniqueFaceLabels.add(currentLabel);
+                                }
+
                                 const now = Date.now();
-                                const lastSeen = this.cooldowns.get(personId);
                                 const PERSON_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+
+                                // FACE COOLDOWN CHECK (trumps personId) - check FIRST
+                                if (currentLabel) {
+                                    const lastFaceNotification = globalFaceCooldowns.get(currentLabel);
+                                    if (lastFaceNotification && (now - lastFaceNotification < PERSON_COOLDOWN_MS)) {
+                                        globalStats.suppressedByFaceCooldown++;
+                                        console.log(`[${timestamp()}] Smart Notifier: Skipping ${personId} - face "${currentLabel}" was recently notified (face cooldown active)`);
+                                        continue;
+                                    }
+                                }
+
+                                // Check per-person cooldown
+                                const lastSeen = globalCooldowns.get(personId);
 
                                 // If we have a lastSeen record, check if we should skip
                                 if (lastSeen) {
                                     const timeDiff = now - lastSeen.timestamp;
                                     if (timeDiff < PERSON_COOLDOWN_MS) {
-                                        // If we are already in cooldown, we only allow UPGRADES
-                                        // An upgrade is when we go from NO label to A label
+                                        // Allow notification if:
+                                        // 1. Upgrade: NO label → named label
+                                        // 2. Label change: different named person (ReID failure case)
                                         const isUpgrade = currentLabel && !lastSeen.label;
+                                        const isLabelChange = currentLabel && lastSeen.label && currentLabel !== lastSeen.label;
 
-                                        // If it's NOT an upgrade, we skip
-                                        if (!isUpgrade) {
+                                        // Only suppress if it's the same person
+                                        if (!isUpgrade && !isLabelChange) {
+                                            globalStats.suppressedByPersonIdCooldown++;
                                             console.log(`[${timestamp()}] Smart Notifier: Skipping notification for ${personId} (cooldown active). Last label: ${lastSeen.label}, Current: ${currentLabel}`);
                                             continue;
                                         }
 
-                                        // If it IS an upgrade, we proceed
-                                        console.log(`[${timestamp()}] Smart Notifier: Cooldown override: Upgrading notification for ${personId} from "${lastSeen.label || 'Person'}" to "${currentLabel}"`);
+                                        // If it IS an upgrade or label change, we proceed
+                                        if (isUpgrade) {
+                                            console.log(`[${timestamp()}] Smart Notifier: Cooldown override: Upgrading notification for ${personId} from "${lastSeen.label || 'Person'}" to "${currentLabel}"`);
+                                            globalStats.upgradeNotificationsSent++;
+                                        } else if (isLabelChange) {
+                                            console.log(`[${timestamp()}] Smart Notifier: Cooldown override: Label changed for ${personId} from "${lastSeen.label}" to "${currentLabel}" (ReID failure - different person)`);
+                                        }
                                     }
                                 }
 
                                 // BUFFERING LOGIC
-                                const pending = this.pendingNotifications.get(personId);
+                                const pending = globalPendingNotifications.get(personId);
 
                                 if (currentLabel) {
                                     // We have a specific name!
                                     if (pending) {
                                         console.log(`[${timestamp()}] Smart Notifier: Found name "${currentLabel}" for pending ${personId}. Sending immediately.`);
                                         clearTimeout(pending.timer);
-                                        this.pendingNotifications.delete(personId);
+                                        globalPendingNotifications.delete(personId);
                                     }
 
                                     // CRITICAL FIX: Check cooldown ONE MORE TIME to be safe against race conditions
-                                    const freshLastSeen = this.cooldowns.get(personId);
+                                    const freshLastSeen = globalCooldowns.get(personId);
                                     if (freshLastSeen && (Date.now() - freshLastSeen.timestamp < PERSON_COOLDOWN_MS)) {
                                         // If we already have a label, and it matches current, SKIP
                                         if (freshLastSeen.label === currentLabel) {
+                                            globalStats.suppressedByPersonIdCooldown++;
                                             console.log(`[${timestamp()}] Smart Notifier: Skipping duplicate notification for ${personId} (race condition caught). Label: ${currentLabel}`);
                                             continue;
                                         }
                                     }
 
+                                    // Check if this is a cooldown miss (should have been caught but wasn't)
+                                    const recentPersonId = globalCooldowns.get(personId);
+                                    if (recentPersonId && (Date.now() - recentPersonId.timestamp < PERSON_COOLDOWN_MS)) {
+                                        globalStats.notificationsSentDespiteRecentPersonId++;
+                                    }
+                                    const recentFace = globalFaceCooldowns.get(currentLabel);
+                                    if (recentFace && (Date.now() - recentFace < PERSON_COOLDOWN_MS)) {
+                                        globalStats.notificationsSentDespiteRecentFace++;
+                                    }
+
                                     // CRITICAL FIX: Update cooldown SYNCHRONOUSLY *before* awaiting the send
-                                    this.cooldowns.set(personId, { timestamp: Date.now(), label: currentLabel });
+                                    globalCooldowns.set(personId, { timestamp: Date.now(), label: currentLabel });
 
                                     // Send notification (async)
+                                    globalStats.namedNotificationsSent++;
                                     await this.sendNotification(personId, currentLabel, jpegBuffer, true);
                                 } else {
                                     // Generic "Person"
-                                    if (this.pendingNotifications.has(personId)) {
+                                    if (globalPendingNotifications.has(personId)) {
                                         // Already buffering, ignore this frame
+                                        globalStats.suppressedByPendingBuffer++;
                                         continue;
                                     }
 
                                     // If we are already in cooldown (and this is generic), we definitely skip
                                     if (lastSeen && (now - lastSeen.timestamp < PERSON_COOLDOWN_MS)) {
+                                        globalStats.suppressedByPersonIdCooldown++;
                                         continue;
                                     }
 
+                                    // Track generic person count for ReID accuracy
+                                    globalStats.genericPersonCount++;
+
                                     // Start buffer
-                                    console.log(`[${timestamp()}] Smart Notifier: Buffering notification for ${personId} (waiting 3s for identification)...`);
+                                    console.log(`[${timestamp()}] Smart Notifier: Buffering notification for ${personId} (waiting 10s for identification)...`);
 
                                     const timer = setTimeout(() => {
                                         // Check cooldown AGAIN before sending, in case an upgrade happened while waiting
-                                        const freshLastSeen = this.cooldowns.get(personId);
+                                        const PERSON_COOLDOWN_MS = 5 * 60 * 1000;
+                                        const freshLastSeen = globalCooldowns.get(personId);
                                         console.log(`[${timestamp()}] Smart Notifier: Buffer timer fired for ${personId}. FreshLastSeen: ${JSON.stringify(freshLastSeen)}`);
 
                                         if (freshLastSeen && (Date.now() - freshLastSeen.timestamp < PERSON_COOLDOWN_MS)) {
+                                            globalStats.suppressedByPendingBuffer++;
                                             console.log(`[${timestamp()}] Smart Notifier: Buffering finished, but person ${personId} was already notified/updated. Skipping generic notification.`);
-                                            this.pendingNotifications.delete(personId);
+                                            globalPendingNotifications.delete(personId);
                                             return;
                                         }
 
+                                        // Check if this is a cooldown miss before sending
+                                        const recentPersonIdCheck = globalCooldowns.get(personId);
+                                        if (recentPersonIdCheck && (Date.now() - recentPersonIdCheck.timestamp < PERSON_COOLDOWN_MS)) {
+                                            globalStats.notificationsSentDespiteRecentPersonId++;
+                                        }
+
                                         // Update cooldown synchronously before sending
-                                        this.cooldowns.set(personId, { timestamp: Date.now(), label: null });
-                                        this.pendingNotifications.delete(personId);
+                                        globalCooldowns.set(personId, { timestamp: Date.now(), label: null });
+                                        globalPendingNotifications.delete(personId);
+                                        globalStats.genericNotificationsSent++;
                                         this.sendNotification(personId, 'Person', jpegBuffer, true);
-                                    }, 3000);
+                                    }, 10000);
 
                                     // Set entry immediately to block parallel requests
-                                    this.pendingNotifications.set(personId, { timer, image: jpegBuffer });
+                                    globalPendingNotifications.set(personId, { timer, image: jpegBuffer });
                                 }
                             } finally {
-                                this.processing.delete(personId);
+                                globalProcessing.delete(personId);
                             }
                         }
                     }
                 } catch (e) {
+                    globalStats.reidServiceFailures++;
                     console.error('Smart Notifier: Failed to call ReID service:', e);
                 }
             });
@@ -355,7 +600,13 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
 
         // Update cooldown if not skipped (legacy support or direct calls)
         if (!skipCooldownUpdate) {
-            this.cooldowns.set(personId, { timestamp: Date.now(), label: name === 'Person' ? null : name });
+            globalCooldowns.set(personId, { timestamp: Date.now(), label: name === 'Person' ? null : name });
+        }
+
+        // Update FACE cooldown for named persons (trumps personId)
+        if (name !== 'Person') {
+            globalFaceCooldowns.set(name, Date.now());
+            console.log(`[${timestamp()}] Smart Notifier: Set face cooldown for "${name}"`);
         }
 
         // Get Notifier device and send notification
@@ -389,15 +640,37 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
     release() {
         this.listener?.removeListener();
         this.listener = null;
-        if (this.checkInterval) {
-            clearInterval(this.checkInterval);
-            this.checkInterval = null;
+
+        // Clear local cleanup interval
+        if ((this as any).localCleanupInterval) {
+            clearInterval((this as any).localCleanupInterval);
+            (this as any).localCleanupInterval = null;
         }
-        // Clear pending timers
-        for (const [id, pending] of this.pendingNotifications) {
-            clearTimeout(pending.timer);
+
+        // Decrement instance counter
+        instanceCount--;
+
+        // Clear global cleanup interval if this is the last instance
+        if (instanceCount === 0) {
+            if (globalCleanupInterval) {
+                clearInterval(globalCleanupInterval);
+                globalCleanupInterval = null;
+            }
+
+            if (statsInterval) {
+                clearInterval(statsInterval);
+                statsInterval = null;
+            }
+
+            // Clear all global state
+            for (const [id, pending] of globalPendingNotifications) {
+                clearTimeout(pending.timer);
+            }
+            globalPendingNotifications.clear();
+            globalCooldowns.clear();
+            globalProcessing.clear();
+            globalFaceCooldowns.clear();
         }
-        this.pendingNotifications.clear();
     }
 }
 
