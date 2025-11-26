@@ -132,14 +132,16 @@ class ReIDEngine:
 
     async def _extract_embedding(self, image_buffer: bytes) -> np.ndarray:
         """Extract ReID embedding from image"""
+        import asyncio
+
         if not self.session:
             raise Exception('Session not initialized')
 
         # Preprocess image
         tensor = self._preprocess_image(image_buffer)
 
-        # Run inference
-        outputs = self.session.run(['output'], {'input': tensor})
+        # Run inference in thread pool to avoid blocking event loop
+        outputs = await asyncio.to_thread(self.session.run, ['output'], {'input': tensor})
 
         # Get embedding (already L2-normalized by model)
         embedding = outputs[0].squeeze()

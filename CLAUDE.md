@@ -166,27 +166,51 @@ Cleanup is critical - implement `release()` to clear timers and listeners.
 
 ## Deployment Process
 
-### Current Setup (as of README)
+### Current Setup
 
-The system now uses a **standalone ReID service** instead of the Scrypted Python plugin due to stability issues.
+The system uses a **standalone ReID service** instead of the Scrypted Python plugin due to stability issues.
 
 **Deployment locations**:
 - Smart Notifier plugin: Deployed to Scrypted server at `192.168.86.74`
-- ReID service: Runs as standalone service at `192.168.86.84:8765`
+- ReID service: Runs on `192.168.86.84:8765` (same machine as this repo)
+
+### Smart Notifier (TypeScript Plugin)
+
+```bash
+cd /Users/richard/node/scrypted-smart-notifier/smart-notifier
+npm run build && npm run deploy
+```
+
+### ReID Service (Python FastAPI)
+
+**Location**: `/Users/richard/node/scrypted-smart-notifier/reid-service-standalone/`
+
+**Check status**:
+```bash
+curl http://localhost:8765/health
+ps aux | grep "python.*app.py" | grep -v grep
+```
+
+**Restart service**:
+```bash
+cd /Users/richard/node/scrypted-smart-notifier/reid-service-standalone
+
+# Kill existing process
+pkill -f "venv/bin/python.*app.py" || true
+
+# Start new instance using venv
+nohup ./venv/bin/python app.py > /tmp/reid-service.log 2>&1 &
+```
+
+**View logs**:
+```bash
+tail -f /tmp/reid-service.log
+```
 
 **Test deployment script** (`deploy-to-test.sh`):
 - Syncs files from this repo to `/Users/richard/node/scrypted/plugins/`
-- Deploys both plugins to test server
+- Deploys TypeScript plugin to test server
 - Hardcoded test IP can be overridden: `./deploy-to-test.sh 192.168.86.75:11443`
-
-### Deployment Workflow
-
-1. Edit code in this repository (`scrypted-smart-notifier/`)
-2. Use `deploy-to-test.sh` script which:
-   - Copies files to Scrypted plugins directory
-   - Builds TypeScript plugin
-   - Deploys to test server
-3. For production: Deploy from `/Users/richard/node/scrypted/plugins/` directories
 
 ## Known Issues & Important Notes
 
