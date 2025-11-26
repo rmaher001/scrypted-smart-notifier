@@ -11,21 +11,39 @@ function timestamp(): string {
 }
 
 
-// Local JPEG resize (nearest-neighbor) for full-frame downscale
-// Ported from llm-notifier
-function resizeJpegNearest(input: Buffer, targetWidth: number, quality = 60): Buffer {
+// Crop JPEG to bounding box (enlarged by percentage) and resize
+function cropAndResizeJpeg(input: Buffer, boundingBox: number[], enlargePercent: number, targetWidth: number, quality = 70): Buffer {
     const { data: src, width: sw, height: sh } = jpeg.decode(input, { useTArray: true });
-    if (!sw || !sh)
-        return input;
-    const dw = Math.min(targetWidth, sw);
-    if (dw === sw)
-        return input;
-    const dh = Math.max(1, Math.round((sh * dw) / sw));
+    if (!sw || !sh) return input;
+
+    // boundingBox is [x, y, width, height] in pixels
+    const [bx, by, bw, bh] = boundingBox;
+
+    // Enlarge bounding box by percentage (e.g., 25% = 0.25)
+    const enlargeX = bw * enlargePercent / 2;
+    const enlargeY = bh * enlargePercent / 2;
+
+    // Calculate enlarged crop region, clamped to image bounds
+    const cropX = Math.max(0, Math.floor(bx - enlargeX));
+    const cropY = Math.max(0, Math.floor(by - enlargeY));
+    const cropX2 = Math.min(sw, Math.ceil(bx + bw + enlargeX));
+    const cropY2 = Math.min(sh, Math.ceil(by + bh + enlargeY));
+    const cropW = cropX2 - cropX;
+    const cropH = cropY2 - cropY;
+
+    if (cropW <= 0 || cropH <= 0) return input;
+
+    // Calculate output dimensions maintaining aspect ratio
+    const dw = Math.min(targetWidth, cropW);
+    const dh = Math.max(1, Math.round((cropH * dw) / cropW));
+
     const dst = Buffer.allocUnsafe(dw * dh * 4);
     for (let y = 0; y < dh; y++) {
-        const sy = Math.floor((y * sh) / dh);
+        // Map destination y to source y within crop region
+        const sy = cropY + Math.floor((y * cropH) / dh);
         for (let x = 0; x < dw; x++) {
-            const sx = Math.floor((x * sw) / dw);
+            // Map destination x to source x within crop region
+            const sx = cropX + Math.floor((x * cropW) / dw);
             const si = (sy * sw + sx) << 2;
             const di = (y * dw + x) << 2;
             dst[di] = src[si];
@@ -40,7 +58,7 @@ function resizeJpegNearest(input: Buffer, targetWidth: number, quality = 60): Bu
 
 // GLOBAL state shared across all camera instances
 const globalCooldowns: Map<string, { timestamp: number, label: string | null }> = new Map();
-const globalPendingNotifications: Map<string, { timer: NodeJS.Timeout, image: Buffer }> = new Map();
+const globalPendingNotifications: Map<string, { timer: NodeJS.Timeout, image: Buffer, boundingBox: number[] }> = new Map();
 const globalProcessing: Set<string> = new Set();
 
 // FACE-BASED cooldown (trumps personId) - keyed by face label (e.g., "Richard")
@@ -104,30 +122,6 @@ let globalStats: Stats = {
 
 let statsInterval: NodeJS.Timeout | null = null;
 
-function resetStats() {
-    globalStats = {
-        personDetections: 0,
-        faceDetections: 0,
-        detectionsWithNames: 0,
-        genericNotificationsSent: 0,
-        namedNotificationsSent: 0,
-        upgradeNotificationsSent: 0,
-        suppressedByPersonIdCooldown: 0,
-        suppressedByFaceCooldown: 0,
-        suppressedByPendingBuffer: 0,
-        suppressedByProcessingLock: 0,
-        notificationsSentDespiteRecentPersonId: 0,
-        notificationsSentDespiteRecentFace: 0,
-        uniquePersonIds: new Set(),
-        uniqueFaceLabels: new Set(),
-        genericPersonCount: 0,
-        reidServiceCalls: 0,
-        reidServiceTotalTime: 0,
-        reidServiceFailures: 0,
-        periodStart: Date.now()
-    };
-}
-
 function logStats() {
     const duration = (Date.now() - globalStats.periodStart) / 1000 / 60; // minutes
     const totalDetections = globalStats.personDetections;
@@ -179,8 +173,6 @@ function logStats() {
     console.log(`\nReID Service: ${globalStats.reidServiceCalls} calls, avg ${avgReidTime}ms, ${globalStats.reidServiceFailures} failures`);
     console.log(`\n${'#'.repeat(70)}`);
     console.log(`${'#'.repeat(70)}\n\n`);
-
-    resetStats();
 }
 
 // Global cleanup interval (runs once for all instances)
@@ -304,25 +296,14 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
 
                 // Call ReID service using BufferConverter interface
                 try {
-                    // Try to get the snapshot from the detection event first
+                    // Get snapshot via getRecordingStreamThumbnail (always works, no 10s cache limit)
                     let snapshot: any = null;
                     try {
-                        if (typeof (source as any).getDetectionInput === 'function') {
-                            snapshot = await (source as any).getDetectionInput(detected.detectionId, details.eventId);
+                        if (typeof (source as any).getRecordingStreamThumbnail === 'function') {
+                            snapshot = await (source as any).getRecordingStreamThumbnail(detected.timestamp);
                         }
                     } catch (e) {
-                        console.log('Smart Notifier: getDetectionInput failed', e);
-                    }
-
-                    // Fallback to recording stream thumbnail
-                    if (!snapshot) {
-                        try {
-                            if (typeof (source as any).getRecordingStreamThumbnail === 'function') {
-                                snapshot = await (source as any).getRecordingStreamThumbnail(detected.timestamp);
-                            }
-                        } catch (e) {
-                            console.log('Smart Notifier: getRecordingStreamThumbnail failed', e);
-                        }
+                        console.log('Smart Notifier: getRecordingStreamThumbnail failed', e);
                     }
 
                     if (!snapshot) {
@@ -528,7 +509,7 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
 
                                     // Send notification (async)
                                     globalStats.namedNotificationsSent++;
-                                    await this.sendNotification(personId, currentLabel, jpegBuffer, true);
+                                    await this.sendNotification(personId, currentLabel, jpegBuffer, det.boundingBox, true);
                                 } else {
                                     // Generic "Person"
                                     if (globalPendingNotifications.has(personId)) {
@@ -548,6 +529,9 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
 
                                     // Start buffer
                                     console.log(`[${timestamp()}] Smart Notifier: Buffering notification for ${personId} (waiting 10s for identification)...`);
+
+                                    // Capture bounding box for closure
+                                    const detBoundingBox = det.boundingBox;
 
                                     const timer = setTimeout(() => {
                                         // Check cooldown AGAIN before sending, in case an upgrade happened while waiting
@@ -572,11 +556,11 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
                                         globalCooldowns.set(personId, { timestamp: Date.now(), label: null });
                                         globalPendingNotifications.delete(personId);
                                         globalStats.genericNotificationsSent++;
-                                        this.sendNotification(personId, 'Person', jpegBuffer, true);
+                                        this.sendNotification(personId, 'Person', jpegBuffer, detBoundingBox, true);
                                     }, 10000);
 
                                     // Set entry immediately to block parallel requests
-                                    globalPendingNotifications.set(personId, { timer, image: jpegBuffer });
+                                    globalPendingNotifications.set(personId, { timer, image: jpegBuffer, boundingBox: detBoundingBox });
                                 }
                             } finally {
                                 globalProcessing.delete(personId);
@@ -591,7 +575,7 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
         }
     }
 
-    async sendNotification(personId: string, name: string, imageBuffer: Buffer, skipCooldownUpdate = false) {
+    async sendNotification(personId: string, name: string, imageBuffer: Buffer, boundingBox: number[], skipCooldownUpdate = false) {
         const title = name !== 'Person' ? `${name} Detected` : `New Person Detected`;
         const body = `${title} at ${this.name}`;
 
@@ -611,10 +595,10 @@ class ListenerMixin extends MixinDeviceBase<ObjectDetector> implements ObjectDet
 
         // Get Notifier device and send notification
         try {
-            // Resize image first
-            const resizedBuffer = resizeJpegNearest(imageBuffer, 640, 70);
-            console.log(`[${timestamp()}] Smart Notifier: Resized notification image to 640px width (${Math.round(imageBuffer.length / 1024)}KB -> ${Math.round(resizedBuffer.length / 1024)}KB)`);
-            const mediaObject = await sdk.mediaManager.createMediaObject(resizedBuffer, 'image/jpeg');
+            // Crop to bounding box (enlarged by 100% = 2x) and resize
+            const croppedBuffer = cropAndResizeJpeg(imageBuffer, boundingBox, 1.0, 640, 70);
+            console.log(`[${timestamp()}] Smart Notifier: Cropped notification image to detection bbox 2x (${Math.round(imageBuffer.length / 1024)}KB -> ${Math.round(croppedBuffer.length / 1024)}KB)`);
+            const mediaObject = await sdk.mediaManager.createMediaObject(croppedBuffer, 'image/jpeg');
 
             // Get the Notifier device (ID 616)
             const notifier = systemManager.getDeviceById<Notifier>('616');
